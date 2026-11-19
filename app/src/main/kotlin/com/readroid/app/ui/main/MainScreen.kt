@@ -64,6 +64,8 @@ import com.readroid.app.core.analyzer.EntryKind
 import com.readroid.app.core.analyzer.ResourceTableInspection
 import com.readroid.app.core.analyzer.ResourceTablePagination
 import com.readroid.app.core.analyzer.StringScanResult
+import com.readroid.app.core.axml.ManifestObservation
+import com.readroid.app.core.axml.ManifestObservations
 import com.readroid.app.core.report.ReportGenerator
 import com.readroid.app.core.project.ApkProject
 import com.readroid.app.core.project.ApkProjectStore
@@ -469,6 +471,7 @@ private fun ResultsPage(
                 ResultPill("Conexões", selectedSection == 2) { onSection(2) }
                 ResultPill("Recursos", selectedSection == 3) { onSection(3) }
                 ResultPill("Arquivos", selectedSection == 4) { onSection(4) }
+                ResultPill("Manifesto", selectedSection == 5) { onSection(5) }
             }
         }
         when (selectedSection) {
@@ -477,6 +480,7 @@ private fun ResultsPage(
             2 -> item { ConnectionSummary(scan) }
             3 -> item { ResourceTableViewer(resourceTable) }
             4 -> item { EntryBrowser(entryInventory, entryInventoryError, activeProject, workspaceBrowser) }
+            5 -> item { ManifestViewer(inspection.manifest) }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -494,6 +498,86 @@ private fun ResultsPage(
     }
 }
 
+
+@Composable
+private fun ManifestViewer(manifest: com.readroid.app.core.axml.ParsedManifest?) {
+    if (manifest == null) {
+        NoticeCard(
+            title = "Manifesto não disponível",
+            body = "O AndroidManifest.xml não pôde ser decodificado como AXML válido. Nenhuma estrutura é inferida.",
+            color = TextSecondary,
+            background = InkOverlay
+        )
+        return
+    }
+    var query by remember(manifest) { mutableStateOf("") }
+    var offset by remember(manifest) { mutableIntStateOf(0) }
+    val observations = ManifestObservations.build(manifest)
+    val filtered = ManifestObservations.filter(observations, query)
+    val page = ManifestObservations.page(filtered, offset)
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Observações do AndroidManifest.xml", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Representação estruturada do parser AXML nativo. Não é XML-fonte; referências, namespaces e atributos não reconhecidos podem permanecer sem resolução.",
+            color = TextSecondary,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+        )
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it; offset = 0 },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Buscar nome ou valor") }
+        )
+        if (page.items.isEmpty()) {
+            Text("Nenhuma observação corresponde à busca.", color = TextSecondary)
+        } else {
+            page.items.forEach { observation ->
+                ManifestObservationCard(observation)
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (page.total == 0) "0 de 0" else "${page.offset + 1}-${page.offset + page.items.size} de ${page.total}",
+                color = TextSecondary,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedButton(onClick = { offset = (offset - page.limit).coerceAtLeast(0) }, enabled = page.offset > 0) { Text("Anterior") }
+                OutlinedButton(onClick = { page.nextOffset?.let { offset = it } }, enabled = page.nextOffset != null) { Text("Próxima") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ManifestObservationCard(observation: ManifestObservation) {
+    val highlight = observation.highlight
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = if (highlight) AmberSoft else InkRaised)
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(observation.category.title, color = if (highlight) Amber else Accent, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
+                Text(sanitizeForDisplay(observation.label, 256), color = TextSecondary, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
+            }
+            Text(
+                observation.value?.let { sanitizeForDisplay(it, 1_000) } ?: "não observado",
+                color = TextPrimary,
+                style = MonoStyle,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
 
 @Composable
 private fun ResourceTableViewer(inspection: ResourceTableInspection?) {
