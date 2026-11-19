@@ -602,26 +602,47 @@ private fun DexBrowser(dexFiles: List<String>, apk: File?) {
     var offset by remember(dexFiles, apk) { mutableIntStateOf(0) }
     var inventory by remember(dexFiles, apk) { mutableStateOf<DexInventory?>(null) }
     var loadError by remember(dexFiles, apk) { mutableStateOf<String?>(null) }
+    var selectedMethod by remember(dexFiles, apk) { mutableStateOf<com.readroid.app.core.analyzer.DexMethodInfo?>(null) }
+    var methodBody by remember(dexFiles, apk) { mutableStateOf<com.readroid.app.core.analyzer.DexMethodBody?>(null) }
+    var methodError by remember(dexFiles, apk) { mutableStateOf<String?>(null) }
+    var requestId by remember(dexFiles, apk) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
 
     fun loadDex(name: String) {
         scope.launch(Dispatchers.IO) {
             val result = runCatching { DexInventoryReader.read(apk, name) }
             inventory = result.getOrNull()
-            loadError = result.exceptionOrNull()?.message ?: "Falha ao ler o DEX."
+            loadError = result.exceptionOrNull()?.message
         }
     }
 
     LaunchedEffect(selectedDex, apk) {
         inventory = null
         loadError = null
+        selectedMethod = null
+        methodBody = null
+        methodError = null
         loadDex(selectedDex)
+    }
+
+    fun openMethod(method: com.readroid.app.core.analyzer.DexMethodInfo) {
+        val thisRequest = ++requestId
+        selectedMethod = method
+        methodBody = null
+        methodError = null
+        scope.launch(Dispatchers.IO) {
+            val result = runCatching { DexInventoryReader.readMethodBody(apk, selectedDex, method.methodIndex) }
+            if (requestId == thisRequest && selectedMethod?.methodIndex == method.methodIndex) {
+                methodBody = result.getOrNull()
+                methodError = result.exceptionOrNull()?.message
+            }
+        }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Inventário de código (DEX)", color = TextPrimary, fontWeight = FontWeight.SemiBold)
         Text(
-            "Classes e métodos listados do índice DEX, sem desassemblagem. Corpos de método não são decodificados nem executados.",
+            "Classes e métodos vêm do índice DEX. Toque em um método para ver uma desassemblagem parcial; instruções não reconhecidas ficam marcadas. Nenhum código é executado.",
             color = TextSecondary,
             style = androidx.compose.material3.MaterialTheme.typography.bodySmall
         )
@@ -651,7 +672,7 @@ private fun DexBrowser(dexFiles: List<String>, apk: File?) {
                     Text("Nenhuma classe corresponde à busca.", color = TextSecondary)
                 }
                 classPage.items.forEach { cls ->
-                    DexClassCard(cls)
+                    DexClassCard(cls, onMethod = ::openMethod, selectedMethodIndex = selectedMethod?.methodIndex)
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -670,11 +691,14 @@ private fun DexBrowser(dexFiles: List<String>, apk: File?) {
                 }
             }
         }
+        selectedMethod?.let { method ->
+            MethodBodyViewer(method, methodBody, methodError)
+        }
     }
 }
 
 @Composable
-private fun DexClassCard(cls: DexClassInfo) {
+private fun DexClassCard(cls: DexClassInfo, onMethod: (com.readroid.app.core.analyzer.DexMethodInfo) -> Unit, selectedMethodIndex: Int?) {
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(containerColor = InkRaised)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(sanitizeForDisplay(cls.descriptor, 512), color = TextPrimary, style = MonoStyle, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -692,14 +716,42 @@ private fun DexClassCard(cls: DexClassInfo) {
             if (cls.methods.isNotEmpty()) {
                 cls.methods.take(6).forEach { method ->
                     Text(
-                        sanitizeForDisplay("${if (method.direct) "direct" else "virtual"} ${method.descriptor}", 256),
-                        color = TextSecondary,
+                        sanitizeForDisplay("${if (method.direct) "direct" else "virtual"} ${method.name} ${method.descriptor}", 256),
+                        color = if (method.methodIndex == selectedMethodIndex) Accent else TextSecondary,
                         style = MonoStyle,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable { onMethod(method) }
                     )
                 }
                 if (cls.methods.size > 6) Text("E mais ${cls.methods.size - 6} método(s).", color = TextSecondary, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MethodBodyViewer(
+    method: com.readroid.app.core.analyzer.DexMethodInfo,
+    body: com.readroid.app.core.analyzer.DexMethodBody?,
+    error: String?
+) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(containerColor = InkOverlay)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(sanitizeForDisplay(method.descriptor, 512), color = Accent, style = MonoStyle, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            when {
+                error != null -> NoticeCard("Corpo de método indisponível", error, Coral, CoralSoft)
+                body == null -> Text("Carregando corpo...", color = TextSecondary)
+                else -> {
+                    Text(
+                        "${body.registersSize} registrador(es) · ${body.insSize} entrada(s) · ${body.outsSize} chamada(s) · ${body.insnsSize} unidade(s)",
+                        color = TextSecondary,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall
+                    )
+                    body.lines.forEach { line ->
+                        Text(sanitizeForDisplay(line, 256), color = TextPrimary, style = MonoStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
             }
         }
     }
