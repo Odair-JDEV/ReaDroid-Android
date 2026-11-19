@@ -124,8 +124,11 @@ object DexInventoryReader {
         while (pc < insnsSize) {
             val firstUnit = u2(bytes, insnsOffset + pc * 2)
             val opcode = firstUnit and 0xff
-            val width = instructionWidth(bytes, insnsOffset, pc, opcode, firstUnit, insnsSize)
-            val line = decodeInstruction(bytes, insnsOffset, pc, opcode, insnsSize)
+            val highByte = firstUnit ushr 8
+            val isPayload = opcode == 0x00 && highByte in 0x01..0x03
+            val effectiveOpcode = if (isPayload) 0x100 or highByte else opcode
+            val width = instructionWidth(bytes, insnsOffset, pc, effectiveOpcode, firstUnit, insnsSize)
+            val line = decodeInstruction(bytes, insnsOffset, pc, effectiveOpcode, insnsSize)
             lines += line
             pc += width
             if (lines.size >= MAX_METHOD_LINES) {
@@ -138,13 +141,32 @@ object DexInventoryReader {
     }
 
     private fun instructionWidth(bytes: ByteArray, base: Int, pc: Int, opcode: Int, firstUnit: Int, insnsSize: Int): Int {
+        fun unit(index: Int): Int {
+            require(pc + index < insnsSize) { "Payload DEX truncado no PC $pc." }
+            return u2(bytes, base + (pc + index) * 2)
+        }
         val width = when {
-            opcode == 0x00 && (firstUnit ushr 8) == 0x01 -> 4 // packed/sparse payload marker
-            opcode in setOf(0x01, 0x04, 0x07, 0x0a, 0x0b, 0x0c, 0x0d, 0x0f, 0x10, 0x11, 0x12, 0x1d, 0x1e, 0x21, 0x27, 0x28, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d) -> 1
-            opcode in setOf(0x02, 0x05, 0x08, 0x13, 0x16, 0x19, 0x1a, 0x1c, 0x22, 0x23, 0x29, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x71, 0x72) -> 2
-            opcode in setOf(0x03, 0x06, 0x09, 0x14, 0x17, 0x1b, 0x24, 0x25, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78) -> 3
-            opcode in 0x7b..0xcf -> 1
-            opcode in 0xd0..0xe2 -> 2
+            opcode == 0x101 -> 4 + unit(1) * 2 // packed-switch payload
+            opcode == 0x102 -> 2 + unit(1) * 4 // sparse-switch payload
+            opcode == 0x103 -> 4 + unit(2) * 2 // fill-array-data payload
+            opcode == 0x00 -> 1
+            opcode in 0x01..0x09 -> when (opcode) { 0x02, 0x05, 0x08 -> 2; 0x03, 0x06, 0x09 -> 3; else -> 1 }
+            opcode in 0x0a..0x12 -> 1
+            opcode == 0x13 || opcode == 0x15 || opcode == 0x16 || opcode == 0x19 || opcode == 0x1a || opcode == 0x1c || opcode == 0x1f || opcode == 0x20 || opcode == 0x22 || opcode == 0x23 -> 2
+            opcode == 0x14 || opcode == 0x17 || opcode == 0x1b || opcode == 0x24 || opcode == 0x25 -> 3
+            opcode in 0x1d..0x1e || opcode == 0x21 || opcode == 0x27 -> 1
+            opcode in 0x26..0x28 -> if (opcode == 0x26) 3 else 1
+            opcode == 0x29 -> 2
+            opcode in 0x2a..0x2c -> 3
+            opcode in 0x2d..0x3d -> if (opcode <= 0x31) 2 else if (opcode <= 0x37) 2 else 2
+            opcode in 0x44..0x6d -> 2
+            opcode in 0x6e..0x72 || opcode in 0x74..0x78 -> 3
+            opcode == 0x73 || opcode == 0x79 || opcode == 0x7a -> 1
+            opcode in 0x7b..0x8f -> 1
+            opcode in 0x90..0xaf -> 2
+            opcode in 0xb0..0xcf -> 1
+            opcode in 0xd0..0xd7 -> 2
+            opcode in 0xd8..0xe2 -> 2
             else -> 1
         }
         require(width > 0 && pc + width <= insnsSize) { "Instrução DEX truncada no PC $pc." }
@@ -152,93 +174,108 @@ object DexInventoryReader {
     }
 
     private fun decodeInstruction(bytes: ByteArray, insnsOffset: Int, pc: Int, opcode: Int, insnsSize: Int): String {
-        val at = { unit: Int -> if (pc + unit < insnsSize) u2(bytes, insnsOffset + (pc + unit) * 2) else 0 }
-        val hex = "%04x".format(pc * 2)
-        val b1 = at(0) shr 8
-        val b2 = at(0) and 0xff
-        return when (opcode) {
-            0x00 -> "nop"
-            0x01 -> "move v$b2, v${at(1) and 0xff}"
-            0x0a -> "move-result v$b2"
-            0x0e -> "return-void"
-            0x0f -> "return v$b2"
-            0x10 -> "return-wide v$b2"
-            0x11 -> "return-object v$b2"
-            0x12 -> "const/4 v$b2, 0x${((at(0) and 0xf00) shr 8).toString(16)}"
-            0x13 -> "const/16 v$b2, 0x${at(1).toString(16)}"
-            0x14 -> "const v$b2, 0x${(at(1) or (at(2) shl 16)).toString(16)}"
-            0x1a -> "const-string v$b2, @string/${at(1)}"
-            0x1c -> "const-class v$b2, @type/${at(1)}"
-            0x22 -> "new-instance v$b2, @type/${at(1)}"
-            0x1b -> "const-string/jumbo v$b2, @string/${(at(1) or (at(2) shl 16))}"
-            0x21 -> "throw v$b2"
-            0x23 -> "new-array v$b2, v${b1}, @type/${at(1)}"
-            0x27 -> "move-exception v$b2"
-            0x28 -> "goto +${(at(0) and 0xff00) shr 8}"
-            0x29 -> "goto/32 +${(at(1) or (at(2) shl 16))}"
-            0x2b -> "packed-switch v$b2, @${(at(1) or (at(2) shl 16))}"
-            0x2c -> "sparse-switch v$b2, @${(at(1) or (at(2) shl 16))}"
-            in 0x2d..0x31 -> {
-                val names = mapOf(0x2d to "cmp", 0x2e to "cmpg", 0x2f to "cmpl", 0x30 to "cmp-long", 0x31 to "cmp-wide")
-                "${names[opcode] ?: "cmp"} v$b2, v$b1, v${at(1) and 0xff}"
+        fun unit(index: Int): Int = if (pc + index < insnsSize) u2(bytes, insnsOffset + (pc + index) * 2) else 0
+        fun signed8(value: Int) = (value shl 24) shr 24
+        fun signed16(value: Int) = value.toShort().toInt()
+        fun signed32(low: Int, high: Int) = low or (high shl 16)
+        fun target(delta: Int) = "0x${(pc + delta).toString(16)}"
+        val first = unit(0)
+        val a = first ushr 8
+        val b = a and 0x0f
+        val c = a ushr 4
+        val aa = a
+        val regB = unit(1) and 0xff
+        val regC = unit(1) ushr 8
+        return when {
+            opcode == 0x00 -> "nop"
+            opcode == 0x101 -> "packed-switch-payload (${unit(1)} case(s))"
+            opcode == 0x102 -> "sparse-switch-payload (${unit(1)} case(s))"
+            opcode == 0x103 -> "array-data-payload (${unit(1)} element width, ${unit(2)} element(s))"
+            opcode == 0x01 || opcode == 0x04 || opcode == 0x07 -> "${arrayOf("move", "move-wide", "move-object")[(opcode - 0x01) / 3]} v$b, v$c"
+            opcode in 0x02..0x09 -> {
+                val names = mapOf(0x02 to "move/from16", 0x03 to "move/16", 0x05 to "move-wide/from16", 0x06 to "move-wide/16", 0x08 to "move-object/from16", 0x09 to "move-object/16")
+                "${names[opcode]} v$aa, v$regB${if (opcode in setOf(0x03, 0x06, 0x09)) ", v${unit(2)}" else ""}"
             }
-            0x32 -> "if-eq v$b2, v$b1, +${at(1) and 0xff}"
-            0x33 -> "if-ne v$b2, v$b1, +${at(1) and 0xff}"
-            0x34 -> "if-lt v$b2, v$b1, +${at(1) and 0xff}"
-            0x35 -> "if-ge v$b2, v$b1, +${at(1) and 0xff}"
-            0x36 -> "if-gt v$b2, v$b1, +${at(1) and 0xff}"
-            0x37 -> "if-le v$b2, v$b1, +${at(1) and 0xff}"
-            0x38 -> "if-eqz v$b2, +${at(1) and 0xff}"
-            0x39 -> "if-nez v$b2, +${at(1) and 0xff}"
-            0x3a -> "if-ltz v$b2, +${at(1) and 0xff}"
-            0x3b -> "if-gez v$b2, +${at(1) and 0xff}"
-            0x3c -> "if-gtz v$b2, +${at(1) and 0xff}"
-            0x3d -> "if-lez v$b2, +${at(1) and 0xff}"
-            in 0x44..0x51 -> {
-                val names = listOf("aget", "aget-wide", "aget-object", "aget-boolean", "aget-byte", "aget-char", "aget-short")
-                "${names[opcode - 0x44]} v$b2, v$b1, v${at(1) and 0xff}"
+            opcode in 0x0a..0x0d -> "${mapOf(0x0a to "move-result", 0x0b to "move-result-wide", 0x0c to "move-result-object", 0x0d to "move-exception")[opcode]} v$aa"
+            opcode == 0x0e -> "return-void"
+            opcode in 0x0f..0x11 -> "${mapOf(0x0f to "return", 0x10 to "return-wide", 0x11 to "return-object")[opcode]} v$aa"
+            opcode == 0x12 -> "const/4 v$b, ${signed8(a shr 4 shl 4) shr 4}"
+            opcode == 0x13 -> "const/16 v$aa, ${signed16(unit(1))}"
+            opcode == 0x14 -> "const v$aa, 0x${signed32(unit(1), unit(2)).toUInt().toString(16)}"
+            opcode == 0x15 -> "const/high16 v$aa, 0x${(signed16(unit(1)) shl 16).toUInt().toString(16)}"
+            opcode == 0x16 -> "const-wide/16 v$aa, ${signed16(unit(1))}"
+            opcode == 0x17 -> "const-wide/32 v$aa, ${signed32(unit(1), unit(2))}"
+            opcode == 0x18 -> "const-wide v$aa, (wide literal)"
+            opcode == 0x19 -> "const-wide/high16 v$aa, 0x${(signed16(unit(1)) shl 48).toULong().toString(16)}"
+            opcode == 0x1a -> "const-string v$aa, @string/${unit(1)}"
+            opcode == 0x1b -> "const-string/jumbo v$aa, @string/${unit(1) or (unit(2) shl 16)}"
+            opcode == 0x1c -> "const-class v$aa, @type/${unit(1)}"
+            opcode == 0x1d -> "monitor-enter v$aa"
+            opcode == 0x1e -> "monitor-exit v$aa"
+            opcode == 0x1f -> "check-cast v$aa, @type/${unit(1)}"
+            opcode == 0x20 -> "instance-of v$b, v$c, @type/${unit(1)}"
+            opcode == 0x21 -> "array-length v$b, v$c"
+            opcode == 0x22 -> "new-instance v$aa, @type/${unit(1)}"
+            opcode == 0x23 -> "new-array v$b, v$c, @type/${unit(1)}"
+            opcode == 0x24 || opcode == 0x25 -> "filled-new-array${if (opcode == 0x25) "/range" else ""} {registers}, @type/${unit(1)}"
+            opcode == 0x26 -> "fill-array-data v$aa, ${target(signed32(unit(1), unit(2)))}"
+            opcode == 0x27 -> "throw v$aa"
+            opcode == 0x28 -> "goto ${target(signed8(a))}"
+            opcode == 0x29 -> "goto/16 ${target(signed16(unit(1)))}"
+            opcode == 0x2a -> "goto/32 ${target(signed32(unit(1), unit(2)))}"
+            opcode == 0x2b || opcode == 0x2c -> "${if (opcode == 0x2b) "packed" else "sparse"}-switch v$aa, ${target(signed32(unit(1), unit(2)))}"
+            opcode in 0x2d..0x31 -> {
+                val names = mapOf(0x2d to "cmpl-float", 0x2e to "cmpg-float", 0x2f to "cmpl-double", 0x30 to "cmpg-double", 0x31 to "cmp-long")
+                "${names[opcode]} v$b, v$c, v$regB"
             }
-            in 0x4b..0x54 -> {
-                val names = listOf("aput", "aput-wide", "aput-object", "aput-boolean", "aput-byte", "aput-char", "aput-short")
-                "${names[opcode - 0x4b]} v$b2, v$b1, v${at(1) and 0xff}"
+            opcode in 0x32..0x37 -> {
+                val names = listOf("if-eq", "if-ne", "if-lt", "if-ge", "if-gt", "if-le")
+                "${names[opcode - 0x32]} v$b, v$c, ${target(signed16(unit(1)))}"
             }
-            0x54 -> "iget v$b2, v$b1, @field/${at(1)}"
-            0x59 -> "iput v$b2, v$b1, @field/${at(1)}"
-            0x62 -> "sget v$b2, @field/${at(1)}"
-            0x69 -> "sput v$b2, @field/${at(1)}"
-            0x6e -> "invoke-virtual {v..}, @method/${at(1)}"
-            0x6f -> "invoke-super {v..}, @method/${at(1)}"
-            0x70 -> "invoke-direct {v..}, @method/${at(1)}"
-            0x71 -> "invoke-static {v..}, @method/${at(1)}"
-            0x72 -> "invoke-interface {v..}, @method/${at(1)}"
-            0x74 -> "invoke-virtual/range {v..}, @method/${at(1)}"
-            0x75 -> "invoke-super/range {v..}, @method/${at(1)}"
-            0x76 -> "invoke-direct/range {v..}, @method/${at(1)}"
-            0x77 -> "invoke-static/range {v..}, @method/${at(1)}"
-            0x78 -> "invoke-interface/range {v..}, @method/${at(1)}"
-            0x0b, 0x0c, 0x0d -> "move${if (opcode == 0x0b) "-wide" else ""}${if (opcode == 0x0c) "-from16" else ""} v$b2, v${at(1) and 0xff}"
-            in 0x7b..0x8f -> {
-                val names = listOf("int-to-long", "int-to-float", "int-to-double", "long-to-int", "long-to-float", "long-to-double",
-                    "float-to-int", "float-to-long", "float-to-double", "double-to-int", "double-to-long", "double-to-float",
-                    "int-to-byte", "int-to-char", "int-to-short")
-                "${names[opcode - 0x7b]} v$b2, v$b1"
+            opcode in 0x38..0x3d -> {
+                val names = listOf("if-eqz", "if-nez", "if-ltz", "if-gez", "if-gtz", "if-lez")
+                "${names[opcode - 0x38]} v$aa, ${target(signed16(unit(1)))}"
             }
-            in 0x90..0xaf -> {
-                val op = when (opcode) {
-                    0x90 -> "add"; 0x91 -> "sub"; 0x92 -> "mul"; 0x93 -> "div"; 0x94 -> "rem"
-                    0x95 -> "and"; 0x96 -> "or"; 0x97 -> "xor"; 0x98 -> "shl"; 0x99 -> "shr"
-                    0x9a -> "ushr"
-                    else -> null
+            opcode in 0x44..0x51 -> {
+                val ops = listOf("aget", "aget-wide", "aget-object", "aget-boolean", "aget-byte", "aget-char", "aget-short",
+                    "aput", "aput-wide", "aput-object", "aput-boolean", "aput-byte", "aput-char", "aput-short")
+                val op = ops[opcode - 0x44]
+                if (opcode <= 0x4a) "$op v$b, v$c, v$regB" else "$op v$b, v$c, v$regB"
+            }
+            opcode in 0x52..0x6d -> {
+                val fieldOps = listOf("iget", "iget-wide", "iget-object", "iget-boolean", "iget-byte", "iget-char", "iget-short",
+                    "iput", "iput-wide", "iput-object", "iput-boolean", "iput-byte", "iput-char", "iput-short",
+                    "sget", "sget-wide", "sget-object", "sget-boolean", "sget-byte", "sget-char", "sget-short",
+                    "sput", "sput-wide", "sput-object", "sput-boolean", "sput-byte", "sput-char", "sput-short")
+                val op = fieldOps[opcode - 0x52]
+                if (opcode <= 0x5e) "$op v$b, v$c, @field/${unit(1)}"
+                else if (opcode <= 0x67) "$op v$aa, @field/${unit(1)}"
+                else "$op v$aa, @field/${unit(1)}"
+            }
+            opcode in 0x6e..0x72 || opcode in 0x74..0x78 -> {
+                val isRange = opcode >= 0x74
+                val names = listOf("invoke-virtual", "invoke-super", "invoke-direct", "invoke-static", "invoke-interface")
+                val op = names[if (isRange) opcode - 0x74 else opcode - 0x6e] + if (isRange) "/range" else ""
+                val count = a and 0x0f
+                val g = a ushr 4
+                val regs = if (isRange) "v${unit(2)} .. v${unit(2) + count - 1}" else {
+                    val w = unit(2); val rs = listOf(w and 0xf, w ushr 4 and 0xf, w ushr 8 and 0xf, w ushr 12 and 0xf).take((count - 1).coerceAtLeast(0))
+                    (rs + if (count > 0) listOf(g) else emptyList()).joinToString(", ") { "v$it" }
                 }
-                if (op != null) "$op v$b2, v$b1, v${at(1) and 0xff}" else "opcode-0x${opcode.toString(16)} v$b2, v$b1, v${at(1) and 0xff}"
+                "$op {$regs}, @method/${unit(1)}"
             }
-            in 0xb0..0xcf -> {
-                val families = listOf("add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "shr", "ushr")
-                val family = families[(opcode - 0xb0) % families.size]
-                "$family/2addr v$b2, v$b1"
+            opcode == 0x7b -> "neg-int v$b, v$c"
+            opcode == 0x7c -> "not-int v$b, v$c"
+            opcode in 0x7b..0x8f -> "${listOf("neg-int", "not-int", "neg-long", "not-long", "neg-float", "neg-double", "int-to-long", "int-to-float", "int-to-double", "long-to-int", "long-to-float", "long-to-double", "float-to-int", "float-to-long", "float-to-double", "double-to-int", "double-to-long", "double-to-float", "int-to-byte", "int-to-char", "int-to-short")[opcode - 0x7b]} v$b, v$c"
+            opcode in 0x90..0xaf -> {
+                val names = listOf("add-int", "sub-int", "mul-int", "div-int", "rem-int", "and-int", "or-int", "xor-int", "shl-int", "shr-int", "ushr-int",
+                    "add-long", "sub-long", "mul-long", "div-long", "rem-long", "and-long", "or-long", "xor-long", "shl-long", "shr-long", "ushr-long",
+                    "add-float", "sub-float", "mul-float", "div-float", "rem-float", "add-double", "sub-double", "mul-double", "div-double", "rem-double")
+                "${names[opcode - 0x90]} v$b, v$c, v$regB"
             }
-            0x1d -> "monitor-enter v$b2"
-            0x1e -> "monitor-exit v$b2"
+            opcode in 0xb0..0xcf -> "${listOf("add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "shr", "ushr")[(opcode - 0xb0) % 11]}-2addr v$b, v$c"
+            opcode in 0xd0..0xd7 -> "${listOf("add-int/lit16", "rsub-int", "mul-int/lit16", "div-int/lit16", "rem-int/lit16", "and-int/lit16", "or-int/lit16", "xor-int/lit16")[opcode - 0xd0]} v$b, v$c, ${signed16(unit(1))}"
+            opcode in 0xd8..0xe2 -> "${listOf("add-int/lit8", "rsub-int/lit8", "mul-int/lit8", "div-int/lit8", "rem-int/lit8", "and-int/lit8", "or-int/lit8", "xor-int/lit8", "shl-int/lit8", "shr-int/lit8", "ushr-int/lit8")[opcode - 0xd8]} v$aa, v$regB, ${signed8(unit(1) ushr 8)}"
             else -> "opcode-0x${opcode.toString(16)} (não decodificado)"
         }
     }
