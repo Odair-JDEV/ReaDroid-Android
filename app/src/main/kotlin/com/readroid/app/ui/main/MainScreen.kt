@@ -57,6 +57,10 @@ import com.readroid.app.core.analyzer.ApkAnalyzer
 import com.readroid.app.core.analyzer.ApkInspectionResult
 import com.readroid.app.core.analyzer.ApkEntryFilter
 import com.readroid.app.core.analyzer.ApkEntryInventory
+import com.readroid.app.core.analyzer.DexClassInfo
+import com.readroid.app.core.analyzer.DexFilter
+import com.readroid.app.core.analyzer.DexInventory
+import com.readroid.app.core.analyzer.DexInventoryReader
 import com.readroid.app.core.analyzer.ApkEntryInventoryReader
 import com.readroid.app.core.analyzer.ApkEntryInventoryException
 import com.readroid.app.core.analyzer.ApkEntryPagination
@@ -278,6 +282,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
                     entryInventoryError = entryInventoryError,
                     activeProject = activeProject,
                     workspaceBrowser = workspaceBrowser,
+                    workingApk = workingApk,
                     report = report,
                     selectedSection = selectedResultSection,
                     onSection = { selectedResultSection = it },
@@ -444,6 +449,7 @@ private fun ResultsPage(
     entryInventoryError: String?,
     activeProject: ApkProject?,
     workspaceBrowser: WorkspaceBrowser?,
+    workingApk: File?,
     report: String?,
     selectedSection: Int,
     onSection: (Int) -> Unit,
@@ -472,6 +478,7 @@ private fun ResultsPage(
                 ResultPill("Recursos", selectedSection == 3) { onSection(3) }
                 ResultPill("Arquivos", selectedSection == 4) { onSection(4) }
                 ResultPill("Manifesto", selectedSection == 5) { onSection(5) }
+                ResultPill("Código", selectedSection == 6) { onSection(6) }
             }
         }
         when (selectedSection) {
@@ -481,6 +488,7 @@ private fun ResultsPage(
             3 -> item { ResourceTableViewer(resourceTable) }
             4 -> item { EntryBrowser(entryInventory, entryInventoryError, activeProject, workspaceBrowser) }
             5 -> item { ManifestViewer(inspection.manifest) }
+            6 -> item { DexBrowser(inspection.dexFiles, workingApk) }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
@@ -575,6 +583,124 @@ private fun ManifestObservationCard(observation: ManifestObservation) {
                 maxLines = 4,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+    }
+}
+
+@Composable
+private fun DexBrowser(dexFiles: List<String>, apk: File?) {
+    if (dexFiles.isEmpty()) {
+        EmptyState("Nenhum arquivo DEX", "Este APK não contém código Dalvik para inventariar.", null)
+        return
+    }
+    if (apk == null) {
+        NoticeCard("APK indisponível", "O arquivo original deste projeto não está aberto nesta tela.", TextSecondary, InkOverlay)
+        return
+    }
+    var selectedDex by remember(dexFiles, apk) { mutableStateOf(dexFiles.first()) }
+    var query by remember(dexFiles, apk) { mutableStateOf("") }
+    var offset by remember(dexFiles, apk) { mutableIntStateOf(0) }
+    var inventory by remember(dexFiles, apk) { mutableStateOf<DexInventory?>(null) }
+    var loadError by remember(dexFiles, apk) { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun loadDex(name: String) {
+        scope.launch(Dispatchers.IO) {
+            val result = runCatching { DexInventoryReader.read(apk, name) }
+            inventory = result.getOrNull()
+            loadError = result.exceptionOrNull()?.message ?: "Falha ao ler o DEX."
+        }
+    }
+
+    LaunchedEffect(selectedDex, apk) {
+        inventory = null
+        loadError = null
+        loadDex(selectedDex)
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Inventário de código (DEX)", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Classes e métodos listados do índice DEX, sem desassemblagem. Corpos de método não são decodificados nem executados.",
+            color = TextSecondary,
+            style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            dexFiles.take(8).forEach { name ->
+                ResultPill(name.removePrefix("classes").removeSuffix(".dex").ifEmpty { "1" }, selectedDex == name) {
+                    selectedDex = name; offset = 0
+                }
+            }
+        }
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it; offset = 0 },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Buscar classe ou método") }
+        )
+        when {
+            loadError != null -> NoticeCard("Leitura DEX recusada", loadError!!, Coral, CoralSoft)
+            inventory == null -> Text("Carregando inventário...", color = TextSecondary)
+            else -> {
+                val inv = inventory!!
+                Text("${inv.classCount} classe(s) · ${inv.methodCount} método(s) no índice · DEX ${inv.version}", color = TextSecondary, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                val filtered = DexInventoryReader.filter(inv, DexFilter(query))
+                val classPage = DexInventoryReader.page(filtered, offset)
+                if (classPage.items.isEmpty()) {
+                    Text("Nenhuma classe corresponde à busca.", color = TextSecondary)
+                }
+                classPage.items.forEach { cls ->
+                    DexClassCard(cls)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        if (classPage.total == 0) "0 de 0" else "${classPage.offset + 1}-${classPage.offset + classPage.items.size} de ${classPage.total}",
+                        color = TextSecondary,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = { offset = (offset - classPage.limit).coerceAtLeast(0) }, enabled = classPage.offset > 0) { Text("Anterior") }
+                        OutlinedButton(onClick = { classPage.nextOffset?.let { offset = it } }, enabled = classPage.nextOffset != null) { Text("Próxima") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DexClassCard(cls: DexClassInfo) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), colors = CardDefaults.cardColors(containerColor = InkRaised)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(sanitizeForDisplay(cls.descriptor, 512), color = TextPrimary, style = MonoStyle, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                buildString {
+                    append("${cls.methods.size} método(s)")
+                    cls.superclass?.let { append(" · super $it") }
+                    cls.sourceFile?.let { append(" · $it") }
+                },
+                color = TextSecondary,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (cls.methods.isNotEmpty()) {
+                cls.methods.take(6).forEach { method ->
+                    Text(
+                        sanitizeForDisplay("${if (method.direct) "direct" else "virtual"} ${method.descriptor}", 256),
+                        color = TextSecondary,
+                        style = MonoStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (cls.methods.size > 6) Text("E mais ${cls.methods.size - 6} método(s).", color = TextSecondary, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }
