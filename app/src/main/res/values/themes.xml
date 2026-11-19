@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      A interface é escura por padrão. O tema da janela acompanha essa decisão
+      para que a abertura do app não pisque em branco antes do Compose desenhar,
+      e o status/navigation bar já nasçam com o mesmo fundo.
+    -->
+    <color name="readroid_ink">#080B12</color>
+
+    <style name="Theme.ReaDroid" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/readroid_ink</item>
+        <item name="android:statusBarColor">@color/readroid_ink</item>
+        <item name="android:navigationBarColor">@color/readroid_ink</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
+    </style>
+
+</resources>
