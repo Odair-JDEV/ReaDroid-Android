@@ -6,6 +6,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -471,7 +473,12 @@ private fun ResultsPage(
         }
         item { OverviewCard(inspection, scan) }
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+            ) {
                 ResultPill("Resumo", selectedSection == 0) { onSection(0) }
                 ResultPill("Permissões", selectedSection == 1) { onSection(1) }
                 ResultPill("Conexões", selectedSection == 2) { onSection(2) }
@@ -646,7 +653,10 @@ private fun DexBrowser(dexFiles: List<String>, apk: File?) {
             color = TextSecondary,
             style = androidx.compose.material3.MaterialTheme.typography.bodySmall
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+        ) {
             dexFiles.take(8).forEach { name ->
                 ResultPill(name.removePrefix("classes").removeSuffix(".dex").ifEmpty { "1" }, selectedDex == name) {
                     selectedDex = name; offset = 0
