@@ -48,6 +48,7 @@ import com.readroid.app.core.ai.AiSettings
 import com.readroid.app.core.ai.PromptLibrary
 import com.readroid.app.core.analyzer.ApkInspectionResult
 import com.readroid.app.core.project.ApkProjectStore
+import com.readroid.app.core.project.ManifestSnapshotStore
 import com.readroid.app.core.editor.AxmlEditor
 import com.readroid.app.core.editor.QuickEditsConfig
 import com.readroid.app.core.signing.ApkRebuilderAndSigner
@@ -102,6 +103,9 @@ fun AdvancedScreen(
     var working by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<SigningResult?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var rollbackWorking by remember { mutableStateOf(false) }
+    var rollbackMessage by remember { mutableStateOf<String?>(null) }
+    var rollbackError by remember { mutableStateOf<String?>(null) }
 
     var ai by remember { mutableStateOf(AiSettings()) }
     var aiAnswer by remember { mutableStateOf<String?>(null) }
@@ -197,7 +201,10 @@ fun AdvancedScreen(
                                                 throw IllegalStateException("Nenhuma flag selecionada difere do valor atual no manifesto.")
                                             }
                                             val unsigned = File(context.cacheDir, "readroid_unsigned.apk")
+                                            val operationId = "sign-${System.currentTimeMillis()}"
                                             try {
+                                                val snapshotStore = ManifestSnapshotStore(projectStore)
+                                                val snapshot = if (projectId != null) snapshotStore.save(projectStore.readProject(projectId), operationId, manifestBytes) else null
                                                 ApkRebuilderAndSigner.replaceManifest(
                                                     sourceApk = apkFile,
                                                     outputApk = unsigned,
@@ -210,7 +217,7 @@ fun AdvancedScreen(
                                                 val signedResult = ApkRebuilderAndSigner.signApk(unsigned, signedApk, keystore, keystoreConfig)
                                                 if (projectId != null) {
                                                     projectStore.operationLog(projectId).append(
-                                                        operationId = "sign-${System.currentTimeMillis()}",
+                                                        operationId = operationId,
                                                         type = "MANIFEST_EDIT_AND_SIGN",
                                                         baseSha256 = projectId,
                                                         inputSha256 = inspection?.sha256,
@@ -275,6 +282,95 @@ fun AdvancedScreen(
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = { saveApk.launch("readroid_assinado.apk") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
                         Text("Salvar APK assinado")
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = InkRaised)
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+                    Text("Histórico de edições e reversão", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Cada edição guarda uma cópia verificada do manifesto anterior. A reversão gera um novo APK assinado com esses bytes; o original permanece intacto.",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (projectId == null) {
+                        Text("Disponível quando o projeto é persistido.", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        val snapshotStore = remember(projectId) { ManifestSnapshotStore(projectStore) }
+                        val log = remember(projectId) { projectStore.operationLog(projectId) }
+                        val editRecords = runCatching { log.readAll().filter { it.type == "MANIFEST_EDIT_AND_SIGN" && it.status == "COMMITTED" } }.getOrDefault(emptyList())
+                        rollbackMessage?.let { Text(it, color = Mint, style = MaterialTheme.typography.bodySmall) }
+                        rollbackError?.let { Text(it, color = Coral, style = MaterialTheme.typography.bodySmall) }
+                        if (editRecords.isEmpty()) {
+                            Text("Nenhuma edição registrada ainda.", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                        }
+                        editRecords.asReversed().forEach { record ->
+                            val hasSnapshot = snapshotStore.find(projectStore.readProject(projectId), record.operationId) != null
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.width(210.dp)) {
+                                    Text(record.operationId, color = TextPrimary, style = MonoStyle, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(record.message ?: "", color = TextSecondary, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        rollbackWorking = true
+                                        rollbackError = null
+                                        rollbackMessage = null
+                                        scope.launch(Dispatchers.IO) {
+                                            try {
+                                                val project = projectStore.readProject(projectId)
+                                                val snapshot = snapshotStore.find(project, record.operationId)
+                                                    ?: throw IllegalStateException("O snapshot desta edição não está disponível.")
+                                                val previousBytes = snapshotStore.load(snapshot)
+                                                val rollbackId = "rollback-${System.currentTimeMillis()}"
+                                                val unsigned = File(context.cacheDir, "readroid_rollback_unsigned.apk")
+                                                try {
+                                                    snapshotStore.save(project, rollbackId, previousBytes)
+                                                    ApkRebuilderAndSigner.replaceManifest(
+                                                        sourceApk = apkFile ?: throw IllegalStateException("APK de origem indisponível."),
+                                                        outputApk = unsigned,
+                                                        newManifestBytes = previousBytes
+                                                    )
+                                                    val (keystore, keystoreConfig) = ApkSignerHelper.getOrCreateProductionKeystore(
+                                                        context,
+                                                        File(context.filesDir, "readroid_signing.p12")
+                                                    )
+                                                    val signedResult = ApkRebuilderAndSigner.signApk(unsigned, signedApk, keystore, keystoreConfig)
+                                                    log.append(
+                                                        operationId = rollbackId,
+                                                        type = "MANIFEST_ROLLBACK",
+                                                        baseSha256 = projectId,
+                                                        inputSha256 = record.outputSha256,
+                                                        outputPath = signedApk.name,
+                                                        outputSha256 = signedResult.sha256,
+                                                        status = if (signedResult.isSuccess) "COMMITTED" else "FAILED",
+                                                        message = "Reversão de ${record.operationId}"
+                                                    )
+                                                    rollbackMessage = if (signedResult.isSuccess) "Reversão assinada pronta para salvar." else "A reversão falhou: ${signedResult.message}"
+                                                    if (signedResult.isSuccess) result = signedResult
+                                                } finally {
+                                                    unsigned.delete()
+                                                }
+                                            } catch (t: Throwable) {
+                                                rollbackError = t.message ?: "Falha ao reverter a edição."
+                                            } finally {
+                                                rollbackWorking = false
+                                            }
+                                        }
+                                    },
+                                    enabled = !rollbackWorking && hasSnapshot
+                                ) {
+                                    Text(if (hasSnapshot) "Reverter" else "Sem snapshot")
+                                }
+                            }
+                        }
                     }
                 }
             }
