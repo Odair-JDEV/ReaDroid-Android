@@ -128,6 +128,7 @@ private data class AnalysisOutcome(
     val scan: StringScanResult,
     val report: String,
     val resourceTable: ResourceTableInspection?,
+    val resourceTableError: String?,
     val entryInventory: ApkEntryInventory?,
     val entryInventoryError: String?
 )
@@ -157,6 +158,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
     var inspection by remember { mutableStateOf<ApkInspectionResult?>(null) }
     var scan by remember { mutableStateOf<StringScanResult?>(null) }
     var resourceTable by remember { mutableStateOf<ResourceTableInspection?>(null) }
+    var resourceTableError by remember { mutableStateOf<String?>(null) }
     var entryInventory by remember { mutableStateOf<ApkEntryInventory?>(null) }
     var entryInventoryError by remember { mutableStateOf<String?>(null) }
     var report by remember { mutableStateOf<String?>(null) }
@@ -198,8 +200,11 @@ fun MainScreen(modifier: Modifier = Modifier) {
                     val original = projectStore.originalFile(project)
                     val inspected = ApkAnalyzer.inspectApk(original).copy(fileName = project.displayName)
                     val strings = ApkAnalyzer.scanStrings(original)
-                    val resourceTable = runCatching { ApkAnalyzer.inspectResourceTable(original) }
-                        .getOrNull()
+                    val resourceTableResult = runCatching { ApkAnalyzer.inspectResourceTable(original) }
+                    val resourceTable = resourceTableResult.getOrNull()
+                    val resourceTableError = resourceTableResult.exceptionOrNull()?.let { t ->
+                        "resources.arsc não pôde ser lido: ${t.message ?: t.javaClass.simpleName}"
+                    }
                     val inventoryResult = runCatching { ApkEntryInventoryReader.read(original) }
                     val markdown = ReportGenerator.buildMarkdownReport(inspected, strings, resourceTable)
                     val savedReport = historyStore.saveReportMarkdown(inspected.sha256, markdown)
@@ -224,12 +229,13 @@ fun MainScreen(modifier: Modifier = Modifier) {
                         status = "COMMITTED",
                         message = project.displayName
                     )
-                    AnalysisOutcome(inspected, strings, markdown, resourceTable, inventoryResult.getOrNull(), inventoryResult.exceptionOrNull()?.let { e -> (e as? ApkEntryInventoryException)?.message ?: "Não foi possível listar as entradas do APK." }) to project
+                    AnalysisOutcome(inspected, strings, markdown, resourceTable, resourceTableError, inventoryResult.getOrNull(), inventoryResult.exceptionOrNull()?.let { e -> (e as? ApkEntryInventoryException)?.message ?: "Não foi possível listar as entradas do APK." }) to project
                 }
                 inspection = outcome.first.inspection
                 scan = outcome.first.scan
                 report = outcome.first.report
                 resourceTable = outcome.first.resourceTable
+                resourceTableError = outcome.first.resourceTableError
                 entryInventory = outcome.first.entryInventory
                 entryInventoryError = outcome.first.entryInventoryError
                 activeProject = outcome.second
@@ -280,6 +286,7 @@ fun MainScreen(modifier: Modifier = Modifier) {
                     inspection = inspection,
                     scan = scan,
                     resourceTable = resourceTable,
+                    resourceTableError = resourceTableError,
                     entryInventory = entryInventory,
                     entryInventoryError = entryInventoryError,
                     activeProject = activeProject,
@@ -447,6 +454,7 @@ private fun ResultsPage(
     inspection: ApkInspectionResult?,
     scan: StringScanResult?,
     resourceTable: ResourceTableInspection?,
+    resourceTableError: String?,
     entryInventory: ApkEntryInventory?,
     entryInventoryError: String?,
     activeProject: ApkProject?,
@@ -492,7 +500,7 @@ private fun ResultsPage(
             0 -> item { SimpleSummary(inspection, scan) }
             1 -> item { PermissionSummary(inspection) }
             2 -> item { ConnectionSummary(scan) }
-            3 -> item { ResourceTableViewer(resourceTable) }
+            3 -> item { ResourceTableViewer(resourceTable, resourceTableError) }
             4 -> item { EntryBrowser(entryInventory, entryInventoryError, activeProject, workspaceBrowser) }
             5 -> item { ManifestViewer(inspection.manifest) }
             6 -> item { DexBrowser(inspection.dexFiles, workingApk) }
@@ -768,13 +776,14 @@ private fun MethodBodyViewer(
 }
 
 @Composable
-private fun ResourceTableViewer(inspection: ResourceTableInspection?) {
+private fun ResourceTableViewer(inspection: ResourceTableInspection?, loadError: String?) {
     if (inspection == null) {
         NoticeCard(
             title = "Tabela de recursos não disponível",
-            body = "Este APK não apresentou resources.arsc legível dentro dos limites de segurança.",
-            color = TextSecondary,
-            background = InkOverlay
+            body = loadError
+                ?: "Este APK não apresentou resources.arsc legível dentro dos limites de segurança.",
+            color = if (loadError != null) Coral else TextSecondary,
+            background = if (loadError != null) CoralSoft else InkOverlay
         )
         return
     }
