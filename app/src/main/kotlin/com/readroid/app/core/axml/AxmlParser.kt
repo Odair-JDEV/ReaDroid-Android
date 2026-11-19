@@ -69,191 +69,159 @@ object AxmlParser {
      * Decodifica a sequência de eventos de elementos XML.
      */
     fun parseEvents(data: ByteArray): List<AxmlEvent> {
-        if (data.size < 8) {
-            throw AxmlException("Arquivo pequeno demais para ser um AXML válido (${data.size} bytes).")
-        }
+        if (data.size < 8) throw AxmlException("Arquivo pequeno demais para ser um AXML válido (${data.size} bytes).")
 
         val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         val magic = buffer.short.toInt() and 0xFFFF
-        if (magic != 0x0003) {
-            throw AxmlException("Assinatura AXML não encontrada (0x0003 esperado, encontrado 0x${magic.toString(16)}).")
-        }
-
+        if (magic != 0x0003) throw AxmlException("Assinatura AXML não encontrada (0x0003 esperado, encontrado 0x${magic.toString(16)}).")
         val headerSize = buffer.short.toInt() and 0xFFFF
-        var pos = headerSize
+        val declaredSize = buffer.int
+        requireAxmlBounds(headerSize >= 8 && headerSize <= declaredSize && declaredSize <= data.size, "cabeçalho AXML")
 
         var stringPool: List<String> = emptyList()
         var resourceMap: List<Int> = emptyList()
         val events = mutableListOf<AxmlEvent>()
-
-        while (pos + 8 <= data.size) {
+        var pos = headerSize
+        while (pos < declaredSize) {
+            requireAxmlBounds(pos + 8 <= declaredSize, "cabeçalho do chunk no offset $pos")
             buffer.position(pos)
             val chunkType = buffer.short.toInt() and 0xFFFF
             val chunkHeaderSize = buffer.short.toInt() and 0xFFFF
             val chunkSize = buffer.int
-
-            if (chunkSize < 8) break
+            requireAxmlBounds(chunkHeaderSize >= 8 && chunkSize >= chunkHeaderSize && pos.toLong() + chunkSize <= declaredSize, "chunk 0x${chunkType.toString(16)} no offset $pos")
+            val chunkEnd = pos + chunkSize
 
             when (chunkType) {
                 RES_STRING_POOL_TYPE -> {
+                    requireAxmlBounds(chunkHeaderSize >= 28, "cabeçalho do string pool")
                     stringPool = parseStringPool(data, pos)
                 }
                 RES_XML_RESOURCE_MAP_TYPE -> {
-                    if (chunkHeaderSize in 8..chunkSize) {
-                        val count = (chunkSize - chunkHeaderSize) / 4
-                        val map = ArrayList<Int>(count.coerceAtLeast(0))
-                        val mapStart = pos + chunkHeaderSize
-                        if (mapStart + (count * 4) <= data.size) {
-                            buffer.position(mapStart)
-                            for (i in 0 until count) {
-                                map.add(buffer.int)
-                            }
-                            resourceMap = map
-                        }
-                    }
+                    requireAxmlBounds(chunkSize - chunkHeaderSize >= 0 && (chunkSize - chunkHeaderSize) % 4 == 0, "mapa de recursos")
+                    val count = (chunkSize - chunkHeaderSize) / 4
+                    buffer.position(pos + chunkHeaderSize)
+                    resourceMap = List(count) { buffer.int }
                 }
                 RES_XML_START_ELEMENT_TYPE -> {
-                    if (pos + 36 <= data.size) {
-                        buffer.position(pos + 16)
-                        val nsIdx = buffer.int
-                        val nameIdx = buffer.int
-                        val attrStart = buffer.short.toInt() and 0xFFFF
-                        val attrSize = buffer.short.toInt() and 0xFFFF
-                        val attrCount = buffer.short.toInt() and 0xFFFF
-
-                        val tagName = if (nameIdx in stringPool.indices) stringPool[nameIdx] else "?"
-                        val attributes = LinkedHashMap<String, String>()
-
-                        for (i in 0 until attrCount) {
-                            val attrPos = pos + 16 + attrStart + (i * attrSize)
-                            if (attrPos + 20 <= data.size) {
-                                buffer.position(attrPos)
-                                val attrNsIdx = buffer.int
-                                val nIdx = buffer.int
-                                val rawValueIdx = buffer.int
-                                val size = buffer.short.toInt() and 0xFFFF
-                                val res0 = buffer.get().toInt() and 0xFF
-                                val dataType = buffer.get().toInt() and 0xFF
-                                val dataVal = buffer.int
-
-                                var attrName = if (nIdx in stringPool.indices) stringPool[nIdx] else ""
-                                if (attrName.isEmpty() && nIdx in resourceMap.indices) {
-                                    val resId = resourceMap[nIdx]
-                                    attrName = KNOWN_RES_IDS[resId] ?: "res_0x${Integer.toHexString(resId)}"
-                                }
-
-                                val attrVal = formatValue(stringPool, rawValueIdx, dataType, dataVal)
-                                if (attrName.isNotEmpty()) {
-                                    attributes[attrName] = attrVal
-                                }
-                            }
+                    requireAxmlBounds(chunkHeaderSize == 16 && chunkSize >= 36, "start element")
+                    buffer.position(pos + 16)
+                    buffer.int // namespace index, resolved only when needed
+                    val nameIdx = buffer.int
+                    val attrStart = buffer.short.toInt() and 0xFFFF
+                    val attrSize = buffer.short.toInt() and 0xFFFF
+                    val attrCount = buffer.short.toInt() and 0xFFFF
+                    buffer.short // class attribute
+                    buffer.short // id attribute
+                    buffer.short // style attribute
+                    requireAxmlBounds(attrSize == 20 && attrStart >= 20 && 16L + attrStart + attrCount.toLong() * attrSize <= chunkSize, "atributos do start element")
+                    requireAxmlBounds(16 + attrStart + attrCount * attrSize <= chunkSize, "atributos do start element")
+                    val tagName = stringPool.getOrNull(nameIdx) ?: throw AxmlException("Índice de tag inválido: $nameIdx.")
+                    val attributes = LinkedHashMap<String, String>()
+                    for (i in 0 until attrCount) {
+                        val attrPos = pos + 16 + attrStart + i * attrSize
+                        requireAxmlBounds(attrPos + 20 <= chunkEnd, "atributo $i")
+                        buffer.position(attrPos)
+                        buffer.int // namespace index
+                        val nIdx = buffer.int
+                        val rawValueIdx = buffer.int
+                        val valueSize = buffer.short.toInt() and 0xFFFF
+                        buffer.get() // reserved
+                        val dataType = buffer.get().toInt() and 0xFF
+                        val dataVal = buffer.int
+                        requireAxmlBounds(valueSize == 8, "valor do atributo $i")
+                        var attrName = stringPool.getOrNull(nIdx).orEmpty()
+                        if (attrName.isEmpty() && nIdx in resourceMap.indices) {
+                            val resId = resourceMap[nIdx]
+                            attrName = KNOWN_RES_IDS[resId] ?: "res_0x${Integer.toHexString(resId)}"
                         }
-                        events.add(AxmlEvent.StartElement(tagName, attributes))
+                        if (attrName.isNotEmpty()) attributes[attrName] = formatValue(stringPool, rawValueIdx, dataType, dataVal)
                     }
+                    events.add(AxmlEvent.StartElement(tagName, attributes))
                 }
                 RES_XML_END_ELEMENT_TYPE -> {
-                    if (pos + 24 <= data.size) {
-                        buffer.position(pos + 20)
-                        val nameIdx = buffer.int
-                        val tagName = if (nameIdx in stringPool.indices) stringPool[nameIdx] else "?"
-                        events.add(AxmlEvent.EndElement(tagName))
-                    }
+                    requireAxmlBounds(chunkHeaderSize == 16 && chunkSize >= 24, "end element")
+                    buffer.position(pos + 20)
+                    val nameIdx = buffer.int
+                    val tagName = stringPool.getOrNull(nameIdx) ?: throw AxmlException("Índice de tag de fechamento inválido: $nameIdx.")
+                    events.add(AxmlEvent.EndElement(tagName))
                 }
             }
-
-            pos += chunkSize
+            pos = chunkEnd
         }
-
-        if (events.isEmpty()) {
-            throw AxmlException("Nenhum elemento XML encontrado no AXML.")
-        }
-
+        if (pos != declaredSize) throw AxmlException("Chunks AXML não cobrem o tamanho declarado.")
+        if (events.isEmpty()) throw AxmlException("Nenhum elemento XML encontrado no AXML.")
         return events
     }
 
+    private fun requireAxmlBounds(condition: Boolean, label: String) {
+        if (!condition) throw AxmlException("Estrutura AXML inválida: $label.")
+    }
+
     fun parseStringPool(data: ByteArray, pos: Int): List<String> {
-        if (pos + 28 > data.size) return emptyList()
         val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+        if (pos + 28 > data.size) throw AxmlException("String pool truncado.")
         buffer.position(pos + 2)
         val headerSize = buffer.short.toInt() and 0xFFFF
         val chunkSize = buffer.int
         val stringCount = buffer.int
-        val styleCount = buffer.int
+        buffer.int // style count
         val flags = buffer.int
         val stringsStart = buffer.int
-        val stylesStart = buffer.int
+        buffer.int // styles start
+        if (stringCount <= 0 || stringCount > 200_000) throw AxmlException("Contagem de strings inválida: $stringCount.")
+        if (chunkSize < headerSize || pos + chunkSize > data.size) throw AxmlException("String pool com limites inválidos.")
 
-        val isUtf8 = (flags and 0x100) != 0
-        if (stringCount <= 0 || stringCount > 200000) return emptyList()
-
-        val offsets = IntArray(stringCount)
         val offsetsStart = pos + headerSize
-        if (offsetsStart + (stringCount * 4) > data.size) return emptyList()
-
+        if (offsetsStart.toLong() + stringCount * 4L > pos + chunkSize) throw AxmlException("Offsets do string pool truncados.")
+        val offsets = IntArray(stringCount)
         buffer.position(offsetsStart)
-        for (i in 0 until stringCount) {
-            offsets[i] = buffer.int
-        }
+        for (i in 0 until stringCount) offsets[i] = buffer.int
 
         val base = pos + stringsStart
+        if (stringsStart < 0 || stringsStart > chunkSize || base > data.size) throw AxmlException("Início do string pool inválido.")
         val strings = ArrayList<String>(stringCount)
-
         for (offset in offsets) {
             val p = base + offset
-            if (p < 0 || p >= data.size) {
-                strings.add("")
-                continue
-            }
-
-            try {
-                if (isUtf8) {
-                    var cur = p
-                    if (cur >= data.size) { strings.add(""); continue }
-                    var charLen = data[cur].toInt() and 0xFF
-                    cur++
-                    if ((charLen and 0x80) != 0) {
-                        if (cur >= data.size) { strings.add(""); continue }
-                        charLen = ((charLen and 0x7F) shl 8) or (data[cur].toInt() and 0xFF)
-                        cur++
-                    }
-                    if (cur >= data.size) { strings.add(""); continue }
-                    var byteLen = data[cur].toInt() and 0xFF
-                    cur++
-                    if ((byteLen and 0x80) != 0) {
-                        if (cur >= data.size) { strings.add(""); continue }
-                        byteLen = ((byteLen and 0x7F) shl 8) or (data[cur].toInt() and 0xFF)
-                        cur++
-                    }
-                    if (cur + byteLen <= data.size) {
-                        strings.add(String(data, cur, byteLen, StandardCharsets.UTF_8))
-                    } else {
-                        strings.add("")
-                    }
-                } else {
-                    var cur = p
-                    if (cur + 2 > data.size) { strings.add(""); continue }
-                    val buffer2 = ByteBuffer.wrap(data, cur, data.size - cur).order(ByteOrder.LITTLE_ENDIAN)
-                    var charLen = buffer2.short.toInt() and 0xFFFF
-                    cur += 2
-                    if ((charLen and 0x8000) != 0) {
-                        if (cur + 2 > data.size) { strings.add(""); continue }
-                        val next = buffer2.short.toInt() and 0xFFFF
-                        charLen = ((charLen and 0x7FFF) shl 16) or next
-                        cur += 2
-                    }
-                    val byteLen = charLen * 2
-                    if (cur + byteLen <= data.size) {
-                        strings.add(String(data, cur, byteLen, StandardCharsets.UTF_16LE))
-                    } else {
-                        strings.add("")
-                    }
-                }
-            } catch (e: Exception) {
-                strings.add("")
-            }
+            if (offset < 0 || p >= pos + chunkSize) throw AxmlException("Offset de string inválido no pool.")
+            strings.add(decodePoolString(data, p, pos + chunkSize, isUtf8 = (flags and 0x100) != 0))
         }
-
         return strings
+    }
+
+    private fun decodePoolString(data: ByteArray, start: Int, end: Int, isUtf8: Boolean): String {
+        var cur = start
+        if (isUtf8) {
+            if (cur >= end) throw AxmlException("String UTF-8 truncada.")
+            var charLen = data[cur].toInt() and 0xFF
+            cur++
+            if ((charLen and 0x80) != 0) {
+                if (cur >= end) throw AxmlException("String UTF-8 truncada.")
+                charLen = ((charLen and 0x7F) shl 8) or (data[cur].toInt() and 0xFF)
+                cur++
+            }
+            if (cur >= end) throw AxmlException("String UTF-8 truncada.")
+            var byteLen = data[cur].toInt() and 0xFF
+            cur++
+            if ((byteLen and 0x80) != 0) {
+                if (cur >= end) throw AxmlException("String UTF-8 truncada.")
+                byteLen = ((byteLen and 0x7F) shl 8) or (data[cur].toInt() and 0xFF)
+                cur++
+            }
+            if (byteLen < 0 || cur + byteLen > end) throw AxmlException("String UTF-8 excede o chunk.")
+            return String(data, cur, byteLen, StandardCharsets.UTF_8)
+        }
+        if (cur + 2 > end) throw AxmlException("String UTF-16 truncada.")
+        val buffer = ByteBuffer.wrap(data, cur, end - cur).order(ByteOrder.LITTLE_ENDIAN)
+        var charLen = buffer.short.toInt() and 0xFFFF
+        cur += 2
+        if ((charLen and 0x8000) != 0) {
+            if (cur + 2 > end) throw AxmlException("String UTF-16 truncada.")
+            charLen = ((charLen and 0x7FFF) shl 16) or (buffer.short.toInt() and 0xFFFF)
+            cur += 2
+        }
+        val byteLen = charLen * 2
+        if (byteLen < 0 || cur + byteLen > end) throw AxmlException("String UTF-16 excede o chunk.")
+        return String(data, cur, byteLen, StandardCharsets.UTF_16LE)
     }
 
     private fun formatValue(strings: List<String>, rawIdx: Int, dataType: Int, dataVal: Int): String {

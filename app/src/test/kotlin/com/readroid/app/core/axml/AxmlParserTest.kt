@@ -138,6 +138,52 @@ class AxmlParserTest {
     }
 
     @Test
+    fun rejectsTruncatedChunkInsteadOfSilentlyStopping() {
+        val valid = buildMinimalAxml()
+        val truncated = valid.copyOf(valid.size - 1)
+        try {
+            AxmlParser.parseEvents(truncated)
+            throw AssertionError("truncated AXML must fail")
+        } catch (_: AxmlException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun rejectsChunkSizeSmallerThanHeader() {
+        val data = buildMinimalAxml()
+        // First string-pool chunk starts at offset 8; its declared size is at +4.
+        val chunkOffset = 8
+        data[chunkOffset + 4] = 8
+        data[chunkOffset + 5] = 0
+        data[chunkOffset + 6] = 0
+        data[chunkOffset + 7] = 0
+        try {
+            AxmlParser.parseEvents(data)
+            throw AssertionError("invalid chunk bounds must fail")
+        } catch (_: AxmlException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun rejectsInvalidAttributeLayout() {
+        val data = buildMinimalAxml()
+        // Start element follows the string pool. Locate its type and corrupt attrSize.
+        var pos = 8
+        val poolSize = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN).apply { position(pos + 4) }.int
+        pos += poolSize
+        data[pos + 26] = 0
+        data[pos + 27] = 0
+        try {
+            AxmlParser.parseEvents(data)
+            throw AssertionError("invalid attribute layout must fail")
+        } catch (_: AxmlException) {
+            // expected
+        }
+    }
+
+    @Test
     fun testParseMinimalAxml() {
         val axmlData = buildMinimalAxml()
         val parsed = AxmlParser.parse(axmlData)
