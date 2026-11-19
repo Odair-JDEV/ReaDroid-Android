@@ -28,6 +28,9 @@ jobs:
         with:
           validate-wrappers: true
 
+      - name: Garantir execucao do gradlew
+        run: chmod +x gradlew
+
       - name: Testes unitarios
         run: ./gradlew testDebugUnitTest --stacktrace
 
