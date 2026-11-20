@@ -51,4 +51,17 @@ class OperationLogTest {
             assertTrue(expected.message!!.contains("linha 1"))
         }
     }
+
+    @Test
+    fun mixedEditsAndRollbacksKeepChainValid() {
+        val log = OperationLog(temp.root, { 1L })
+        log.append("sign-1", "MANIFEST_EDIT_AND_SIGN", baseHash, status = "COMMITTED")
+        log.append("rollback-1", "MANIFEST_ROLLBACK", baseHash, inputSha256 = "b".repeat(64), status = "COMMITTED")
+        log.append("sign-2", "MANIFEST_EDIT_AND_SIGN", baseHash, status = "COMMITTED")
+        log.append("rollback-2", "MANIFEST_ROLLBACK", baseHash, status = "FAILED")
+        val records = log.readAll()
+        assertEquals(4, records.size)
+        assertEquals(listOf("MANIFEST_EDIT_AND_SIGN", "MANIFEST_ROLLBACK", "MANIFEST_EDIT_AND_SIGN", "MANIFEST_ROLLBACK"), records.map { it.type })
+        records.zipWithNext().forEach { (a, b) -> assertEquals(a.recordHash, b.prevRecordHash) }
+    }
 }

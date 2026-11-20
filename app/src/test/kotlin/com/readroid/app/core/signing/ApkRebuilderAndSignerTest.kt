@@ -42,6 +42,30 @@ class ApkRebuilderAndSignerTest {
         }
     }
 
+    @Test
+    fun repeatedManifestReplacementsKeepOtherEntriesIntact() {
+        val source = File(temp.root, "source.apk")
+        val output1 = File(temp.root, "edit1.apk")
+        val output2 = File(temp.root, "edit2.apk")
+        val manifest = byteArrayOf(3, 0, 8, 0, 8, 0, 0, 0)
+        val resources = ByteArray(19) { it.toByte() }
+        val library = byteArrayOf(0x7f, 0x45, 0x4c, 0x46)
+        val dex = byteArrayOf(1, 2, 3)
+        createApk(source, manifest, resources, library)
+
+        val editedOnce = manifest + byteArrayOf(1)
+        ApkRebuilderAndSigner.replaceManifest(source, output1, editedOnce)
+        val editedTwice = editedOnce + byteArrayOf(2)
+        ApkRebuilderAndSigner.replaceManifest(output1, output2, editedTwice)
+
+        ZipFile(output2).use { zip ->
+            assertTrue(zip.getInputStream(zip.getEntry("AndroidManifest.xml")).use { it.readBytes().contentEquals(editedTwice) })
+            assertTrue(zip.getInputStream(zip.getEntry("resources.arsc")).use { it.readBytes().contentEquals(resources) })
+            assertTrue(zip.getInputStream(zip.getEntry("lib/arm64-v8a/libnative.so")).use { it.readBytes().contentEquals(library) })
+            assertTrue(zip.getInputStream(zip.getEntry("classes.dex")).use { it.readBytes().contentEquals(dex) })
+        }
+    }
+
     private fun createApk(file: File, manifest: ByteArray, resources: ByteArray, library: ByteArray) {
         ZipOutputStream(file.outputStream()).use { zip ->
             zip.putNextEntry(ZipEntry("AndroidManifest.xml"))
